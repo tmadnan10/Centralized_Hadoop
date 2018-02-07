@@ -87,13 +87,14 @@ public class AccumXtX implements Serializable {
 		// Parsing input arguments
 		final String hdfsuri;
 		final String path;
+		final String round;
 
 		try {
 			hdfsuri = System.getProperty("hdfsuri");
 			if (hdfsuri == null)
 				throw new IllegalArgumentException();
 		} catch (Exception e) {
-			printLogMessage("i");
+			printLogMessage("hdfsuri");
 			return;
 		}
 
@@ -103,6 +104,15 @@ public class AccumXtX implements Serializable {
 				throw new IllegalArgumentException();
 		} catch (Exception e) {
 			printLogMessage("i");
+			return;
+		}
+		
+		try {
+			round = System.getProperty("round");
+			if (round == null)
+				throw new IllegalArgumentException();
+		} catch (Exception e) {
+			printLogMessage("round");
 			return;
 		}
 
@@ -120,7 +130,7 @@ public class AccumXtX implements Serializable {
 
 		// log.info("Principal components computed successfully ");
 
-		computePrincipalComponents(sc, path, hdfsuri);
+		computePrincipalComponents(sc, path, hdfsuri, round);
 
 		double allocatedMemory = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory());
 		double presumableFreeMemory = Runtime.getRuntime().maxMemory() - allocatedMemory;
@@ -129,11 +139,15 @@ public class AccumXtX implements Serializable {
 	}
 
 	public static org.apache.spark.mllib.linalg.Matrix computePrincipalComponents(JavaSparkContext sc, String path,
-			final String hdfsuri) throws IOException {
+			final String hdfsuri, String round) throws IOException {
 
 		// path = /user/hdfs/
-		// inputPath = /user/hdfs/XtX/
+		// inputPath = /user/hdfs
 		// outputPath = /user/hdfs/AccumXtX/
+		// path = /user/hdfs/
+		// inputPath = /user/hdfs/XtX/round+XtX+nodeID
+		// checkPath = /user/hdfs/XtXCheck/round+XtX+nodeID
+		// outputPath = /user/hdfs/AccumXtX/XtX
 
 		// ====== Init HDFS File System Object
 		Configuration conf = new Configuration();
@@ -156,19 +170,20 @@ public class AccumXtX implements Serializable {
 		Path[] paths = new Path[nodes.length];
 
 		for (int i = 0; i < nodes.length; i++) {
-			System.out.println(hdfsuri + path + "/XtXCheck/XtX" + nodes[i]);
-			paths[i] = new Path(hdfsuri + path + "/XtXCheck/XtX" + nodes[i]);
+			System.out.println(hdfsuri + path + "/XtXCheck/" + round + "XtX" + nodes[i]);
+			paths[i] = new Path(hdfsuri + path + "/XtXCheck/" + round + "XtX" + nodes[i]);
 		  check[i] = false;
     }
 
 		int count = nodes.length;
-
+			
 		while (count > 0) {
 			for (int i = 0; i < nodes.length; i++) {
-        //System.out.println(check[i]+" "+paths[i].getName());
+				System.out.println(paths[i].getName());
 				if (!check[i] && fs.exists(paths[i])) {
 					count--;
 					check[i] = true;
+					fs.delete(paths[i]);
 				}
 			}
 		}
@@ -190,7 +205,7 @@ public class AccumXtX implements Serializable {
 				return matrix;
 			}
 		});
-    System.out.println("Done Loading XtXs");
+
 		Matrix R = matrices.treeReduce(new Function2<Matrix, Matrix, Matrix>() {
 
 			@Override
@@ -199,6 +214,9 @@ public class AccumXtX implements Serializable {
 				return v1.plus(v2);
 			}
 		});
+		
+		
+		
 		System.out.println(R);
 		// basically our computation is finished, but we have to save it now
 		// back to HDFS
@@ -219,12 +237,14 @@ public class AccumXtX implements Serializable {
 		});
 
 		// TODO check without the above parallelizing
-
-    System.out.println("Done");
-    for (int i = 0; i < paths.length; i++) {
-      fs.delete(paths[i]);
-    }
-    Path XtXReady = new Path(hdfsuri+"/user/hdfs/XtXReady");
+		
+		for (int i = 0; i < nodes.length; i++) {
+			System.out.println(hdfsuri + path + "/XtX/" + round + "XtX" + nodes[i]);
+			Path p = new Path(hdfsuri + path + "/XtX/" + round + "XtX" + nodes[i]);
+			fs.delete(p);
+		}
+		
+		Path XtXReady = new Path(hdfsuri+path+"XtXReady");
 		fs.createNewFile(XtXReady);
 		return null;
 	}

@@ -9,7 +9,9 @@
 */
 package org.qcri.sparkpca;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.Serializable;
 import java.security.SecureRandom;
@@ -52,7 +54,6 @@ import org.slf4j.LoggerFactory;
 
 import scala.Tuple2;
 
-
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -61,6 +62,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 
 import java.net.URI;
+
 /**
  * This code provides an implementation of PPCA: Probabilistic Principal
  * Component Analysis based on the paper from Tipping and Bishop:
@@ -75,19 +77,19 @@ import java.net.URI;
 public class AccumW implements Serializable {
 	private final static Logger log = LoggerFactory.getLogger(SparkPCA.class);// getLogger(SparkPCA.class);
 	private static final Logger logger = LoggerFactory.getLogger(SparkPCA.class);
-	public static void main(String[] args) throws IOException {
-		
+
+	public static void main(String[] args) throws IOException, InterruptedException{
 		org.apache.log4j.Logger.getLogger("org").setLevel(Level.ERROR);
 		org.apache.log4j.Logger.getLogger("akka").setLevel(Level.ERROR);
 
 		// Parsing input arguments
 		final String hdfsuri;
-		final String inputPath;
-		final String outputPath;
-		final int nRows;
+		final String path;
 		final int nCols;
 		final int nPCs;
-		//HDFS uri input
+		final int WIndex;
+		final int round;
+		// HDFS uri input
 		try {
 			hdfsuri = System.getProperty("hdfsuri");
 			if (hdfsuri == null)
@@ -96,28 +98,13 @@ public class AccumW implements Serializable {
 			printLogMessage("i");
 			return;
 		}
-		
+
 		try {
-			inputPath = System.getProperty("i");
-			if (inputPath == null)
+			path = System.getProperty("i");
+			if (path == null)
 				throw new IllegalArgumentException();
 		} catch (Exception e) {
 			printLogMessage("i");
-			return;
-		}
-		try {
-			outputPath = System.getProperty("o");
-			if (outputPath == null)
-				throw new IllegalArgumentException();
-		} catch (Exception e) {
-			printLogMessage("o");
-			return;
-		}
-
-		try {
-			nRows = Integer.parseInt(System.getProperty("rows"));
-		} catch (Exception e) {
-			printLogMessage("rows");
 			return;
 		}
 
@@ -140,153 +127,265 @@ public class AccumW implements Serializable {
 			printLogMessage("pcs");
 			return;
 		}
+		
+		try {
+			WIndex = Integer.parseInt(System.getProperty("index"));
+		} catch (Exception e) {
+			printLogMessage("cols");
+			return;
+		}
+		
+		try {
+			round = Integer.parseInt(System.getProperty("round"));
+		} catch (Exception e) {
+			printLogMessage("cols");
+			return;
+		}
 
 		// Setting Spark configuration parameters
-		SparkConf conf = new SparkConf().setAppName("WriteW");//.setMaster("local[*]");// TODO
-																						// remove
-																						// this
-																						// part
-																						// for
-																						// building
+		SparkConf conf = new SparkConf().setAppName("AccumW");// .setMaster("local[*]");//
+																// TODO
+																// remove
+																// this
+																// part
+																// for
+																// building
 		conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
 		conf.set("spark.kryoserializer.buffer.max", "128m");
 		JavaSparkContext sc = new JavaSparkContext(conf);
 
 		// log.info("Principal components computed successfully ");
 
-		computePrincipalComponents(sc, inputPath, outputPath, nRows, nCols, nPCs,hdfsuri);
+		computePrincipalComponents(sc, path, nCols, nPCs, round, WIndex, hdfsuri);
 
 		double allocatedMemory = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory());
 		double presumableFreeMemory = Runtime.getRuntime().maxMemory() - allocatedMemory;
 		System.out.println(presumableFreeMemory / Math.pow(1024, 3));
 
 	}
+	
+	public static void runCommand(String commandString) throws IOException, InterruptedException{
+        System.out.println(commandString);
+        Process p = Runtime.getRuntime().exec(commandString);
+        p.waitFor();
+    }
 
-	public static org.apache.spark.mllib.linalg.Matrix computePrincipalComponents(JavaSparkContext sc, final String inputPath,
-			String outputPath, final int nRows, final int nCols, final int nPCs, final String hdfsuri) throws IOException {
+	public static org.apache.spark.mllib.linalg.Matrix computePrincipalComponents(JavaSparkContext sc,
+			final String path, final int nCols, final int nPCs, final int round, final int index,
+		 final String hdfsuri) throws IOException, InterruptedException {
+
+		// path = /user/hdfs/
+		// inputPath = /user/hdfs/W/WIndex/round+W+nodeID
+		// checkPath = /user/hdfs/WCheck/WIndex/round+W+nodeID
+		// outputPath = /user/hdfs/AccumXtX/WIndex/WIndex
+
 		
-				
-		 //==== Read file
-	      logger.error("Read file into hdfs");
-	      //Create a path
-	      //Init input stream
-        File checkDone = new File(inputPath+"AccumW/");
-        while(!checkDone.exists()) System.out.println(checkDone.getName()+" not present");
-																			//"/user/hdfs/W/"
-        JavaPairRDD<IntWritable, MatrixWritable> seqV = sc.sequenceFile(inputPath+"AccumW/", IntWritable.class, MatrixWritable.class);
-        System.out.println("Previous W");
-        Matrix mat = seqV.collect().get(0)._2.get();
-        System.out.println(mat);
-        JavaPairRDD<IntWritable, MatrixWritable> seqVectors = sc.sequenceFile(inputPath+"W/", IntWritable.class,
-				MatrixWritable.class);
-		JavaRDD<Matrix> matrices= seqVectors.map(new Function<Tuple2<IntWritable, MatrixWritable>, Matrix>() {
-
-					public Matrix call(Tuple2<IntWritable, MatrixWritable> arg0)
-							throws Exception {
-
-						Matrix matrix = arg0._2.get();
-						return matrix;
-					}
-				});
+		BufferedReader ID = new BufferedReader(new FileReader("ID"));
+        String myID = ID.readLine();
+        String partitionCountString = ID.readLine();
+        int partitionCount = Integer.parseInt(partitionCountString);
+        String dwString = ID.readLine();
+        double dw = Double.parseDouble(dwString);
+        String maxWnewString = ID.readLine();
+        double maxWnew = Double.parseDouble(maxWnewString);
+        ID.close();
 		
-	      Matrix R = matrices.treeReduce(new Function2<Matrix, Matrix, Matrix>() {
+		
+		// ====== Init HDFS File System Object
+		Configuration conf = new Configuration();
+		// Set FileSystem URI
+		conf.set("fs.defaultFS", hdfsuri);
+		// Because of Maven
+		conf.set("fs.hdfs.impl", org.apache.hadoop.hdfs.DistributedFileSystem.class.getName());
+		conf.set("fs.file.impl", org.apache.hadoop.fs.LocalFileSystem.class.getName());
+		// Set HADOOP user
+		System.setProperty("HADOOP_USER_NAME", "hdfs");
+		System.setProperty("hadoop.home.dir", "/");
+		// Get the filesystem - HDFS
+		FileSystem fs = FileSystem.get(URI.create(hdfsuri), conf);
 
-				@Override
-				public Matrix call(Matrix v1, Matrix v2) throws Exception {
-					// TODO Auto-generated method stub
-					return v1.plus(v2);
+		BufferedReader br = new BufferedReader(new FileReader("nodes"));
+		String line = br.readLine();
+		String[] nodes = line.split("\\s+");
+		Boolean[] check = new Boolean[nodes.length];
+		Path[] paths = new Path[nodes.length];
+
+		for (int i = 0; i < nodes.length; i++) {
+			System.out.println(hdfsuri + path + "/WCheck/W" + index + "/" + round + "W" + nodes[i]);
+			paths[i] = new Path(hdfsuri + path + "/WCheck/W" + index + "/" + round + "W" + nodes[i]);
+		  check[i] = false;
+    }
+
+		int count = nodes.length;
+
+		while (count > 0) {
+			for (int i = 0; i < nodes.length; i++) {
+				if (!check[i] && fs.exists(paths[i])) {
+					System.out.println(paths[i].getName()+" exists");
+					count--;
+					check[i] = true;
+          fs.delete(paths[i]);
 				}
-			});
-	    System.out.println("Done Accumulation");
-	    System.out.println(R);
+			}
+		}
+    
+    JavaPairRDD<IntWritable, MatrixWritable> seqVectors = null;
 
 
+    Matrix prev = new DenseMatrix(nCols, nPCs);
+    System.out.println(path + "AccumW/W" + index + "/");
+    seqVectors = sc.sequenceFile(path + "AccumW/W" + index + "/", IntWritable.class, MatrixWritable.class);
+    System.out.println("Previous W");
+    prev = seqVectors.collect().get(0)._2.get();
+    System.out.println(prev);    
+		// ==== Read file
+		logger.error("Read file into hdfs");
+		// Create a path
+		// Init input stream
+		seqVectors = sc.sequenceFile(path+"/W/W"+index+"/", IntWritable.class,
+				MatrixWritable.class);
+		JavaRDD<Matrix> matrices = seqVectors.map(new Function<Tuple2<IntWritable, MatrixWritable>, Matrix>() {
 
-      double maxWnew = 0;
-        double dw = 0;
-        for (int p = 0; p < nCols; p++) {
+			public Matrix call(Tuple2<IntWritable, MatrixWritable> arg0) throws Exception {
+
+				Matrix matrix = arg0._2.get();
+				return matrix;
+			}
+		});
+
+		Matrix R = matrices.treeReduce(new Function2<Matrix, Matrix, Matrix>() {
+
+			@Override
+			public Matrix call(Matrix v1, Matrix v2) throws Exception {
+				// TODO Auto-generated method stub
+				return v1.plus(v2);
+			}
+		});
+    
+
+		System.out.println("New W\n "+R);
+		
+		
+		
+		
+		// basically our computation is finished, but we have to save it now
+		// back to HDFS
+		// as hdfs can locally save data, the codes below is a my version of
+		// parallelizing
+
+		// send same R to every node
+		final Broadcast<Matrix> br_R = sc.broadcast(R);
+		final String outputPath = path + "AccumW/W"+index+"/";
+		// for each node save the file
+		matrices.foreach(new VoidFunction<Matrix>() {
+
+			public void call(Matrix yi) throws Exception {
+				individuallySave(br_R.value(), outputPath, hdfsuri,index);
+			}
+
+		});
+
+		// TODO check without the above parallelizing
+
+		
+		for (int p = 0; p < nCols; p++) {
             for (int q = 0; q < nPCs; q++) {
                 maxWnew = Math.max(Math.abs(R.getQuick(p, q)), maxWnew);
             }
         }
         for (int p = 0; p < nCols; p++) {
             for (int q = 0; q < nPCs; q++) {
-                dw = Math.max(Math.abs(mat.getQuick(p, q) - R.getQuick(p, q)), dw);
+                dw = Math.max(Math.abs(prev.getQuick(p, q) - R.getQuick(p, q)), dw);
             }
         }
-        double sqrtEps = 2.2204e-16;
-        dw /= (sqrtEps + maxWnew);
-        System.out.println(dw);
+        double tolerance = 0.05;
+        if(index == partitionCount ) { //last segment of W ..... endpoinnt of a round
+            double sqrtEps = 2.2204e-16;
+            dw /= (sqrtEps + maxWnew);
+            if (dw <= tolerance) { //convergence achieved
+                String commandString = "./writeDW.sh "+dw;
+                runCommand(commandString);
+                System.out.println("Convergence Achieved");
+                commandString = "./conv.sh "+round;
+                runCommand(commandString);
+                commandString = "./write.sh "+myID;
+                runCommand(commandString);
+            }
+            else { //no convergence
+                String commandString = "./writeDW.sh "+dw;
+                runCommand(commandString);
+                System.out.println("dw of Round "+round+": "+dw);
+                maxWnew = 0;
+                dw = 0;
+            }
+        }
+        
+        
+        
+        String strToWrite = "";
+        strToWrite = myID+"\\n"+partitionCount+"\\n"+dw+"\\n"+maxWnew;
+        String commandString = "./write.sh "+strToWrite;
+        runCommand(commandString);
 
-      System.out.println("Done Accumulation R");
-	    //basically our computation is finished, but we have to save it now back to HDFS
-	    //as hdfs can locally save data, the codes below is a my version of parallelizing
-	    
-	    //send same R to every node
-	   final Broadcast<Matrix> br_R=sc.broadcast(R);
-	    
-	    //for each node save the file
-	    matrices.foreach(new VoidFunction<Matrix>() {
-
-			public void call(Matrix yi) throws Exception {
-				individuallySave(br_R.value(),inputPath,hdfsuri);
-			}
-
-		});
-	    
-	    //TODO check without the above parallelizing
-	   
-	    
-		System.out.println(R);
-		
+        Path doneW = new Path(hdfsuri+path+round+"doneW"+index);
+		    fs.createNewFile(doneW);
+		    for (int i = 0; i < nodes.length; i++) {
+      System.out.println(hdfsuri + path + "/W/W" + index + "/" + round + "W" + nodes[i]);
+      Path p = new Path(hdfsuri + path + "/W/W" + index + "/" + round + "W" + nodes[i]);
+      fs.delete(p);
+    }
 		return null;
 	}
-	
-	public static void individuallySave(Matrix matrix,String path, String hdfsuri) throws IOException
-    {
-       
-          
-  	      // ====== Init HDFS File System Object
-  	      Configuration conf = new Configuration();
-  	      // Set FileSystem URI
-  	      conf.set("fs.defaultFS", hdfsuri);
-  	      // Because of Maven
-  	      conf.set("fs.hdfs.impl", org.apache.hadoop.hdfs.DistributedFileSystem.class.getName());
-  	      conf.set("fs.file.impl", org.apache.hadoop.fs.LocalFileSystem.class.getName());
-  	      // Set HADOOP user
-  	      System.setProperty("HADOOP_USER_NAME", "hdfs");
-  	      System.setProperty("hadoop.home.dir", "/");
-  	      //Get the filesystem - HDFS
-  	      FileSystem fs = FileSystem.get(URI.create(hdfsuri), conf);
 
-  	      //==== Create folder if not exists
-  	      Path newFolderPath= new Path(path+"AccumW/");
-  	      if(!fs.exists(newFolderPath)) {
-  	         // Create new Directory
-  	         fs.mkdirs(newFolderPath);
-  	         logger.error("Path "+path+" created.");
-  	      }
+	public static void individuallySave(Matrix matrix, String path, String hdfsuri, int index) throws IOException {
 
-  	      //==== Write file
-  	      logger.error("Begin Write file into hdfs");
-  	      //Create a path
-  	      Path hdfswritepath = new Path(newFolderPath + "/" + "W");//change the name as you see fit //TODO
-  	      //Init output stream
-  	      //Cassical output stream usage
-  	      SequenceFile.Writer writer=SequenceFile.createWriter(fs, conf, hdfswritepath
-  	    		  , IntWritable.class, MatrixWritable.class, CompressionType.BLOCK);
-  	      final IntWritable key = new IntWritable();
-  	      final MatrixWritable value = new MatrixWritable();
-  	      key.set(0);
-  	      value.set(matrix);
-  	      writer.append(key, value);
-  	      writer.close();
-  	      logger.error("End Write file into hdfs");
-        
-    }
+		// ====== Init HDFS File System Object
+		Configuration conf = new Configuration();
+		// Set FileSystem URI
+		conf.set("fs.defaultFS", hdfsuri);
+		// Because of Maven
+		conf.set("fs.hdfs.impl", org.apache.hadoop.hdfs.DistributedFileSystem.class.getName());
+		conf.set("fs.file.impl", org.apache.hadoop.fs.LocalFileSystem.class.getName());
+		// Set HADOOP user
+		System.setProperty("HADOOP_USER_NAME", "hdfs");
+		System.setProperty("hadoop.home.dir", "/");
+		// Get the filesystem - HDFS
+		FileSystem fs = FileSystem.get(URI.create(hdfsuri), conf);
+
+		// ==== Create folder if not exists
+		Path newFolderPath = new Path(path);
+		if (!fs.exists(newFolderPath)) {
+			// Create new Directory
+			fs.mkdirs(newFolderPath);
+			logger.error("Path " + path + " created.");
+		}
+
+		// ==== Write file
+		logger.error("Begin Write file into hdfs");
+		// Create a path
+		Path hdfswritepath = new Path(newFolderPath + "/" + "W" + index);// change the
+																	// name as
+																	// you see
+																	// fit
+																	// //TODO
+		// Init output stream
+		// Cassical output stream usage
+		SequenceFile.Writer writer = SequenceFile.createWriter(fs, conf, hdfswritepath, IntWritable.class,
+				MatrixWritable.class, CompressionType.BLOCK);
+		final IntWritable key = new IntWritable();
+		final MatrixWritable value = new MatrixWritable();
+		key.set(0);
+		value.set(matrix);
+		writer.append(key, value);
+		writer.close();
+		logger.error("End Write file into hdfs");
+
+	}
+
 	private static void printLogMessage(String argName) {
 		log.error("Missing arguments -D" + argName);
 		log.info(
 				"Usage: -Di=<path/to/input/matrix> -Do=<path/to/outputfolder> -Drows=<number of rows> -Dcols=<number of columns> -Dpcs=<number of principal components> [-DerrSampleRate=<Error sampling rate>] [-DmaxIter=<max iterations>] [-DoutFmt=<output format>] [-DComputeProjectedMatrix=<0/1 (compute projected matrix or not)>]");
 	}
 }
+
